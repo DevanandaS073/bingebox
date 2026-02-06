@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 interface Movie {
   id: number;
   title: string;
   genre: string;
   summary: string;
+  year?: number;
 }
 
 export default function RateMovies({ userId, selectedGenres, onFinish }: { userId: number; selectedGenres: string[]; onFinish: () => void }) {
@@ -91,7 +92,10 @@ export default function RateMovies({ userId, selectedGenres, onFinish }: { userI
                 <div key={movie.id} className="bg-[#141414] hover:bg-[#1f1f1f] transition duration-300 p-6 rounded-md flex flex-col sm:flex-row gap-6 items-start sm:items-center border border-white/5">
 
                   <div className="flex-1">
-                    <h3 className="text-xl font-bold text-white mb-1">{movie.title}</h3>
+                    <h3 className="text-xl font-bold text-white mb-1">
+                      {movie.title}
+                      {movie.year ? <span className="ml-2 text-gray-400 font-normal">({movie.year})</span> : null}
+                    </h3>
                     <p className="text-xs text-gray-400 uppercase tracking-wider mb-2">{movie.genre}</p>
                     <p className="text-gray-300 text-sm leading-relaxed">{movie.summary}</p>
                   </div>

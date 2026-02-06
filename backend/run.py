@@ -31,6 +31,12 @@ def get_db():
 # Load ML model
 # -----------------------
 
+import re
+
+# -----------------------
+# Load ML model
+# -----------------------
+
 print("📥 Loading model_small.pkl...")
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model_small.pkl")
@@ -40,6 +46,16 @@ with open(MODEL_PATH, 'rb') as f:
 
 movies = data['movies']
 ratings = data['ratings']
+
+# 📄 EXTRACT YEAR FROM TITLE
+def extract_year(title):
+    match = re.search(r'\((\d{4})\)', title)
+    if match:
+        return int(match.group(1))
+    return 0
+
+print("📅 Extracting movie years...")
+movies['year'] = movies['title'].apply(extract_year)
 
 print("📊 Data loaded:")
 print("Movies:", len(movies))
@@ -83,13 +99,14 @@ print("✅ Backend fully ready!\n")
 # Recommendation logic
 # -----------------------
 
-# -----------------------
-# Recommendation logic
-# -----------------------
-
-# -----------------------
-# Recommendation logic
-# -----------------------
+MOOD_MAP = {
+    "Happy": ["Comedy", "Adventure", "Animation", "Musical"],
+    "Funny": ["Comedy", "Animation"],
+    "Sad": ["Drama", "Romance", "Documentary"],
+    "Quirky": ["Indie", "Fantasy", "Comedy"], # Indie might not be a genre in dataset, checking... usually standard genres
+    "Romantic": ["Romance", "Comedy"],
+    "Action": ["Action", "Thriller", "Sci-Fi", "Adventure"]
+}
 
 def recommend(user_id, n=10, method="hybrid"):
 
@@ -106,9 +123,6 @@ def recommend(user_id, n=10, method="hybrid"):
     
     cur.close()
     conn.close()
-
-    if not rating_rows and not pref_row:
-        return []
 
     # Process Ratings
     user_ratings_dict = {row[0]: row[1] for row in rating_rows}
@@ -127,9 +141,18 @@ def recommend(user_id, n=10, method="hybrid"):
         
     print(f"👤 User {user_id} | Genres: {preferred_genres} | Mood: {preferred_mood}")
 
+    # MOOD GENRES
+    mood_target_genres = MOOD_MAP.get(preferred_mood, [])
+
     predictions = []
 
-    for mid in movies['movieId']:
+    # Filter for candidates: ONLY movies > 2000
+    # We can either filter explicitly or just punish older movies heavily.
+    # User requested Strict filtering "Fetch only movies released between 2000 and 2026".
+    candidate_movies = movies[movies['year'] >= 2000]
+
+    for index, row in candidate_movies.iterrows():
+        mid = row['movieId']
 
         if mid in rated_movie_ids:
             continue
@@ -157,10 +180,6 @@ def recommend(user_id, n=10, method="hybrid"):
 
         # Content-based
         if mid in content_similarity_df.columns:
-            # If user has no ratings, we can't do typical content-based similarity to their favorites.
-            # But we can matching against their PREFERRED GENRES if we wanted.
-            # For now, let's keep the rating-based content logic, but handle empty ratings case.
-            
             if rating_rows:
                 sorted_user_ratings = sorted(rating_rows, key=lambda x: x[1], reverse=True)
                 top_3_favs = [x[0] for x in sorted_user_ratings[:3]]
@@ -170,8 +189,11 @@ def recommend(user_id, n=10, method="hybrid"):
                         scores.append(content_similarity_df[mid][fav])
                 if scores:
                     score_content = float(np.mean(scores))
+            else:
+                # Cold start: Boost basic content score slightly if we have no history
+                score_content = 0.0
 
-        # Final score calculation
+        # Base Score
         if method == "collaborative":
             final_score = score_collab
         elif method == "content":
@@ -183,34 +205,33 @@ def recommend(user_id, n=10, method="hybrid"):
         # BOOSTING LOGIC 🚀
         # ---------------------------
         
-        # Boost if movie genre matches user preferences
-        # We need to look up this movie's genres. 
-        # 'movies' dataframe has 'movieId', 'title', 'genres' (string like "Action|Adventure")
+        movie_genres_str = row['genres']
+        movie_genres_list = movie_genres_str.split('|')
         
-        movie_row = movies[movies['movieId'] == mid]
-        if not movie_row.empty:
-            movie_genres_str = movie_row.iloc[0]['genres']
-            movie_genres_list = movie_genres_str.split('|')
+        # 1. Genre Match Boost
+        overlap = set(preferred_genres).intersection(movie_genres_list)
+        if overlap:
+            final_score += 0.3 # Strong additive boost
             
-            # Check overlap
-            overlap = set(preferred_genres).intersection(movie_genres_list)
-            if overlap:
-                # Boost 20%
-                final_score += 0.5  # Add raw score boost or multiplier
-                # Multiplier might be better if score is non-zero, but addictive ensures
-                # even 0-score movies (no ratings overlap) get some visibility if genre matches.
-                # Let's do additive to fix the "Cold Start" problem entirely.
+        # 2. Mood Match Boost
+        mood_overlap = set(mood_target_genres).intersection(movie_genres_list)
+        if mood_overlap:
+            final_score += 0.2
+            
+        # 3. Recency Bias (Multiplicative)
+        # year from 2000 to 2026.
+        # 2000 -> 1.0
+        # 2024 -> 1.24
+        age_bonus = 1.0 + (row['year'] - 2000) * 0.01
+        final_score *= age_bonus
         
         if final_score > 0:
             predictions.append({
                 "movieId": mid,
-                "score": final_score
+                "score": final_score,
+                "year": row['year']
             })
             
-    # If no predictions (new user, no ratings), we rely purely on Boosting above?
-    # Wait, if score_collab and score_content are 0, final_score is 0.
-    # The boosting adds 0.5. So they will be added.
-    
     if not predictions:
         return []
 
@@ -218,9 +239,18 @@ def recommend(user_id, n=10, method="hybrid"):
         .sort_values("score", ascending=False)\
         .head(n)
 
-    result = result.merge(movies, on="movieId")
+    result = result.merge(movies, on="movieId", suffixes=('', '_dup'))
+    # Clean up duplicate columns if any (merge might add _dup if columns exist in both)
+    # Actually movies has 'year' now, so predictions 'year' and movies 'year' might crash or duplicate.
+    # predictions has 'year', movies has 'year'. merge on movieId.
+    # Result will have year_x and year_y.
+    
+    # Let's fix column selection
+    final_cols = []
+    if 'year_x' in result.columns:
+        result['year'] = result['year_x']
 
-    return result[["title", "genres", "score"]].to_dict("records")
+    return result[["title", "genres", "score", "year"]].to_dict("records")
 
 # -----------------------
 # AUTH APIs
@@ -388,25 +418,30 @@ def get_movies_by_genre():
 
     # If no genres provided, return top rated or random
     if not genres:
-        sample = movies.sample(n=n)
+        # Filter for year >= 2000
+        candidates = movies[movies['year'] >= 2000]
+        sample = candidates.sample(n=n)
     else:
         # Filter movies that match ANY of the genres
         # movies['genres'] is a pipe-separated string "Action|Adventure"
         
-        # Create a boolean mask
-        mask = movies['genres'].apply(lambda x: any(g in x.split('|') for g in genres))
-        filtered_movies = movies[mask]
+        # Filter for year >= 2000 first
+        candidates = movies[movies['year'] >= 2000]
+        
+        # Create a boolean mask on the filtered candidates
+        mask = candidates['genres'].apply(lambda x: any(g in x.split('|') for g in genres))
+        filtered_movies = candidates[mask]
         
         if filtered_movies.empty:
-            # Fallback if no matches found (rare)
-            sample = movies.sample(n=n)
+            # Fallback if no matches found (rare), but still respect year
+            sample = candidates.sample(n=n)
         elif len(filtered_movies) < n:
             # Return all if less than n
             sample = filtered_movies
         else:
             sample = filtered_movies.sample(n=n)
 
-    result = sample[['movieId', 'title', 'genres']].to_dict('records')
+    result = sample[['movieId', 'title', 'genres', 'year']].to_dict('records')
     
     # Add a mock summary if not present (dataset dependent, usually datasets like movielens don't have summaries)
     # The frontend expects a summary. Let's add a placeholder if missing.
@@ -414,7 +449,7 @@ def get_movies_by_genre():
     # Our 'movies' df likely came from MovieLens which only has title/genres.
     # Let's add a generic summary.
     for movie in result:
-        movie['summary'] = f"A popular {movie['genres'].replace('|', ', ')} movie."
+        movie['summary'] = f"Released in {movie['year']}. A popular {movie['genres'].replace('|', ', ')} movie."
         # Frontend RateMovies props expect: id, title, genre, summary
         # Rename keys to match frontend expectation or update frontend
         movie['id'] = movie.pop('movieId')

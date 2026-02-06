@@ -7,7 +7,6 @@ interface Props {
 export default function Preferences({ userId, onNext }: { userId: number; onNext: (genres: string[]) => void }) {
 
   const moods = ["Happy", "Funny", "Sad", "Quirky", "Romantic", "Action"];
-  // ... (rest of constants same as before)
   const genres = ["Action", "Comedy", "Drama", "Sci-Fi", "Horror", "Thriller", "Romance"];
 
   const [selectedMood, setSelectedMood] = useState("");
@@ -29,8 +28,6 @@ export default function Preferences({ userId, onNext }: { userId: number; onNext
 
     // Save to backend
     try {
-      console.log("Sending preferences to backend...", { user_id: userId, genres: selectedGenres, mood: selectedMood });
-
       const response = await fetch("http://localhost:5000/api/preferences", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -41,9 +38,7 @@ export default function Preferences({ userId, onNext }: { userId: number; onNext
         })
       });
 
-      console.log("Response status:", response.status);
       const data = await response.json();
-      console.log("Response data:", data);
 
       if (response.ok) {
         onNext(selectedGenres);
